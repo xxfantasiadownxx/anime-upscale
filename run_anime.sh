@@ -9,10 +9,10 @@ UPSCALED_FRAMES_DIR="$BASE_DIR/upscaled_frame_files"
 OUTPUT_DIR="$BASE_DIR/upscaled_video_files"
 SCRIPTS_DIR="$BASE_DIR/scripts"
 STATUS_FILE="$BASE_DIR/status.json"
+COMPOSE_LOG="$BASE_DIR/compose_run.log"
 
 mkdir -p "$INPUT_DIR" "$FRAMES_DIR" "$UPSCALED_FRAMES_DIR" "$OUTPUT_DIR" "$SCRIPTS_DIR"
 
-# Write wrapper scripts that containers will mount
 cat > "$SCRIPTS_DIR/extract.sh" << 'EOF'
 #!/bin/sh
 ffmpeg -hwaccel cuda -i "/original_video_files/$EPISODE_FILE" /original_frame_files/frame%08d.png
@@ -53,8 +53,6 @@ echo ">>> Found $TOTAL_FILES file(s) to process."
 
 BATCH_START=$(date +%s)
 
-# Write filenames to a temp file so Python reads them safely —
-# avoids shell-interpolation breakage on apostrophes, brackets, etc.
 NAMES_FILE="$BASE_DIR/status_names.tmp"
 printf '%s\n' "${VIDEO_FILES[@]}" | sed 's|.*/||' > "$NAMES_FILE"
 
@@ -140,23 +138,36 @@ for i in "${!VIDEO_FILES[@]}"; do
   rm -f "$UPSCALED_FRAMES_DIR"/frame*.png
 
   update_status "$i" "$FILENAME" "running" "extracting" ""
+  : > "$COMPOSE_LOG"
 
   echo ">>> Starting anime pipeline..."
-  PIPELINE_LOG=$(EPISODE_FILE="$FILENAME" \
+
+  # Run compose in background, tee to log and stdout for live visibility
+  EPISODE_FILE="$FILENAME" \
     EPISODE_FPS="$EPISODE_FPS" \
     OUTPUT_FILE="$OUTPUT_FILE" \
     docker compose \
       --project-directory "$BASE_DIR" \
       --project-name upscale-anime \
-      up --abort-on-container-failure 2>&1)
+      up --abort-on-container-failure 2>&1 | tee "$COMPOSE_LOG" &
+  COMPOSE_PID=$!
 
+  # Poll log and advance stage as each container completes
+  CURRENT_STAGE="extracting"
+  while kill -0 $COMPOSE_PID 2>/dev/null; do
+    if [ "$CURRENT_STAGE" = "extracting" ] && \
+       grep -q "anime-ffmpeg-extract.*exited with code 0" "$COMPOSE_LOG" 2>/dev/null; then
+      CURRENT_STAGE="upscaling"
+      update_status "$i" "$FILENAME" "running" "upscaling" ""
+    elif [ "$CURRENT_STAGE" = "upscaling" ] && \
+         grep -q "anime-upscale.*exited with code 0" "$COMPOSE_LOG" 2>/dev/null; then
+      CURRENT_STAGE="reassembling"
+      update_status "$i" "$FILENAME" "running" "reassembling" ""
+    fi
+    sleep 3
+  done
+  wait $COMPOSE_PID
   COMPOSE_EXIT=$?
-
-  if echo "$PIPELINE_LOG" | grep -q "anime-upscale.*exited with code 0"; then
-    update_status "$i" "$FILENAME" "running" "reassembling" ""
-  elif echo "$PIPELINE_LOG" | grep -q "anime-ffmpeg-extract.*exited with code 0"; then
-    update_status "$i" "$FILENAME" "running" "upscaling" ""
-  fi
 
   docker compose \
     --project-directory "$BASE_DIR" \
@@ -164,12 +175,14 @@ for i in "${!VIDEO_FILES[@]}"; do
     down 2>/dev/null
 
   if [ $COMPOSE_EXIT -ne 0 ]; then
-    ERROR_MSG=$(echo "$PIPELINE_LOG" | grep -E "(Error|error|failed|exited with code [^0])" | tail -5)
+    ERROR_MSG=$(grep -E "(Error|error|failed|exited with code [^0])" "$COMPOSE_LOG" | tail -5)
     echo "ERROR: Pipeline failed for $FILENAME"
-    echo "$PIPELINE_LOG" > "$LOG_FILE"
-    echo "" >> "$LOG_FILE"
-    echo "=== SUMMARY ===" >> "$LOG_FILE"
-    echo "$ERROR_MSG" >> "$LOG_FILE"
+    cp "$COMPOSE_LOG" "$LOG_FILE"
+    {
+      echo ""
+      echo "=== SUMMARY ==="
+      echo "$ERROR_MSG"
+    } >> "$LOG_FILE"
     echo ">>> Error log written to $LOG_FILE"
     update_status "$i" "$FILENAME" "failed" "failed" "$ERROR_MSG"
     FAILED=$(( FAILED + 1 ))
@@ -178,7 +191,7 @@ for i in "${!VIDEO_FILES[@]}"; do
     continue
   fi
 
-  # ── Rename _out frames for ffmpeg ───────────────
+  # Real-ESRGAN appends _out to filenames; rename back to frame%08d.png for ffmpeg
   echo ">>> Renaming upscaled frames..."
   COUNT=1
   for F in $(ls "$UPSCALED_FRAMES_DIR"/frame*_out.png 2>/dev/null | sort); do
