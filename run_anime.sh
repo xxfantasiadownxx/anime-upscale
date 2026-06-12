@@ -115,6 +115,15 @@ for i in "${!VIDEO_FILES[@]}"; do
   echo "  File $FILE_NUM of $TOTAL_FILES : $FILENAME"
   echo "================================================"
 
+  # Record per-file start time directly into status.json
+  python3 - "$STATUS_FILE" "$i" "$(date +%s)" << 'PYEOF'
+import json, sys
+sf, idx, ts = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+with open(sf) as fp: s = json.load(fp)
+s["files"][idx]["start_time"] = ts
+s["files"][idx]["end_time"] = None
+with open(sf, "w") as fp: json.dump(s, fp, indent=2)
+PYEOF
   update_status "$i" "$FILENAME" "running" "probing" ""
 
   echo ">>> Probing framerate..."
@@ -185,6 +194,13 @@ for i in "${!VIDEO_FILES[@]}"; do
     } >> "$LOG_FILE"
     echo ">>> Error log written to $LOG_FILE"
     update_status "$i" "$FILENAME" "failed" "failed" "$ERROR_MSG"
+    python3 - "$STATUS_FILE" "$i" "$(date +%s)" << 'PYEOF'
+import json, sys
+sf, idx, ts = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+with open(sf) as fp: s = json.load(fp)
+s["files"][idx]["end_time"] = ts
+with open(sf, "w") as fp: json.dump(s, fp, indent=2)
+PYEOF
     FAILED=$(( FAILED + 1 ))
     FAILED_FILES+=("$FILENAME")
     rm -f "$FRAMES_DIR"/frame*.png "$UPSCALED_FRAMES_DIR"/frame*.png
@@ -208,6 +224,14 @@ for i in "${!VIDEO_FILES[@]}"; do
   rm -f "$UPSCALED_FRAMES_DIR"/frame*.png
 
   update_status "$i" "$FILENAME" "done" "complete" ""
+  # Record end time
+  python3 - "$STATUS_FILE" "$i" "$(date +%s)" << 'PYEOF'
+import json, sys
+sf, idx, ts = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+with open(sf) as fp: s = json.load(fp)
+s["files"][idx]["end_time"] = ts
+with open(sf, "w") as fp: json.dump(s, fp, indent=2)
+PYEOF
   SUCCEEDED=$(( SUCCEEDED + 1 ))
   echo ">>> Done : $OUTPUT_DIR/$OUTPUT_FILE"
 done
