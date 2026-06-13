@@ -1,8 +1,9 @@
-# Usage: called by run.sh — do not run directly.
+# Usage: called by run_anime.sh — do not run directly.
+# run_anime.sh sets: EPISODE_FILE, OUTPUT_FILE, EPISODE_FPS
 services:
   extract:
     image: jrottenberg/ffmpeg:4.4-nvidia
-    container_name: restore-ffmpeg-extract
+    container_name: anime-ffmpeg-extract
     volumes:
       - ./original_video_files:/original_video_files
       - ./original_frame_files:/original_frame_files
@@ -21,13 +22,13 @@ services:
 
   upscale:
     image: ghcr.io/ralphv/realesrgan-with-models
-    container_name: restore-upscale
+    container_name: anime-upscale
     volumes:
       - ./original_frame_files:/original_frame_files
       - ./upscaled_frame_files:/upscaled_frame_files
     command:
       - -n
-      - realesr-general-x4v3
+      - realesr-animevideov3
       - -i
       - /original_frame_files
       - -o
@@ -38,6 +39,7 @@ services:
       - "64"
       - --tile_pad
       - "10"
+      - --fp32
     deploy:
       resources:
         reservations:
