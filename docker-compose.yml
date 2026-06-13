@@ -1,9 +1,8 @@
-# Usage: called by run_anime.sh — do not run directly.
-# run_anime.sh sets: EPISODE_FILE, OUTPUT_FILE, EPISODE_FPS
+# Usage: called by run.sh — do not run directly.
 services:
   extract:
     image: jrottenberg/ffmpeg:4.4-nvidia
-    container_name: anime-ffmpeg-extract
+    container_name: restore-ffmpeg-extract
     volumes:
       - ./original_video_files:/original_video_files
       - ./original_frame_files:/original_frame_files
@@ -22,13 +21,13 @@ services:
 
   upscale:
     image: ghcr.io/ralphv/realesrgan-with-models
-    container_name: anime-upscale
+    container_name: restore-upscale
     volumes:
       - ./original_frame_files:/original_frame_files
       - ./upscaled_frame_files:/upscaled_frame_files
     command:
       - -n
-      - realesr-animevideov3
+      - realesr-general-x4v3
       - -i
       - /original_frame_files
       - -o
@@ -39,7 +38,6 @@ services:
       - "64"
       - --tile_pad
       - "10"
-      - --fp32
     deploy:
       resources:
         reservations:
@@ -50,29 +48,4 @@ services:
     runtime: nvidia
     depends_on:
       extract:
-        condition: service_completed_successfully
-
-  reassemble:
-    image: jrottenberg/ffmpeg:4.4-nvidia
-    container_name: anime-ffmpeg-reassemble
-    volumes:
-      - ./upscaled_frame_files:/upscaled_frame_files
-      - ./original_video_files:/original_video_files
-      - ./upscaled_video_files:/upscaled_video_files
-      - ./scripts/reassemble.sh:/reassemble.sh:ro
-    entrypoint: ["/bin/sh", "/reassemble.sh"]
-    environment:
-      - EPISODE_FILE=${EPISODE_FILE}
-      - EPISODE_FPS=${EPISODE_FPS}
-      - OUTPUT_FILE=${OUTPUT_FILE}
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu, compute, video, utility]
-    runtime: nvidia
-    depends_on:
-      upscale:
         condition: service_completed_successfully
