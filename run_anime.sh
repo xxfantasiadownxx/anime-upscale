@@ -1,6 +1,6 @@
 #!/bin/bash
-# run_anime.sh — Batch upscale animated videos to 1080p using realesr-animevideov3
-# Usage: ./run_anime.sh
+# run.sh — Batch upscale videos to 1080p using realesr-general-x4v3
+# Usage: ./run.sh
 
 BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INPUT_DIR="$BASE_DIR/original_video_files"
@@ -184,7 +184,7 @@ for i in "${!VIDEO_FILES[@]}"; do
   FILE_NUM=$(( i + 1 ))
   LOG_FILE="$OUTPUT_DIR/${FILENAME%.*}_error.log"
   EPISODE_FILE="$FILENAME"
-  OUTPUT_FILE="${FILENAME%.*}_anime_1080p.mkv"
+  OUTPUT_FILE="${FILENAME%.*}_upscaled_1080p.mkv"
 
   echo ""
   echo "================================================"
@@ -314,14 +314,18 @@ except Exception:
   NORMALIZED_FILE="${FILENAME%.*}_normalized.mkv"
 
   NORMALIZE_LOG="$BASE_DIR/normalize_run.log"
-  EPISODE_FILE="$FILENAME" NORMALIZE_VF="$NORMALIZE_VF" NORMALIZE_FPS="$NORMALIZE_FPS" \
-    NORMALIZED_FILE="$NORMALIZED_FILE" HAS_AUDIO="$HAS_AUDIO" \
-    docker run --rm \
+  docker run --rm \
     -v "$INPUT_DIR":/original_video_files \
-    --gpus all \
+    -v "$SCRIPTS_DIR/normalize.sh":/normalize.sh:ro \
+    --runtime nvidia \
+    -e EPISODE_FILE="$FILENAME" \
+    -e NORMALIZE_VF="$NORMALIZE_VF" \
+    -e NORMALIZE_FPS="$NORMALIZE_FPS" \
+    -e NORMALIZED_FILE="$NORMALIZED_FILE" \
+    -e HAS_AUDIO="$HAS_AUDIO" \
     --entrypoint /bin/sh \
     jrottenberg/ffmpeg:4.4-nvidia \
-    -c "$(cat "$SCRIPTS_DIR/normalize.sh" | tail -n +2)" \
+    /normalize.sh \
     > "$NORMALIZE_LOG" 2>&1
   NORMALIZE_EXIT=$?
 
@@ -352,10 +356,10 @@ except Exception:
   # Poll in background, run compose in foreground so exit code is reliable
   POLL_SENTINEL="$BASE_DIR/.poll_active"
   touch "$POLL_SENTINEL"
-  poll_stage "$COMPOSE_LOG" "anime-ffmpeg-extract" "anime-upscale" "$i" "$FILENAME" "$POLL_SENTINEL" &
+  poll_stage "$COMPOSE_LOG" "restore-ffmpeg-extract" "restore-upscale" "$i" "$FILENAME" "$POLL_SENTINEL" &
   POLL_PID=$!
 
-  run_compose "$BASE_DIR/docker-compose.yml" "upscale-anime" "$COMPOSE_LOG"
+  run_compose "$BASE_DIR/docker-compose.yml" "upscale-general" "$COMPOSE_LOG"
   STAGE1_EXIT=$?
 
   rm -f "$POLL_SENTINEL"
@@ -400,7 +404,7 @@ except Exception:
   echo ">>> Reassembling..."
 
   REASSEMBLE_LOG="$BASE_DIR/reassemble_run.log"
-  run_compose "$BASE_DIR/docker-compose.reassemble.yml" "upscale-anime-reassemble" "$REASSEMBLE_LOG"
+  run_compose "$BASE_DIR/docker-compose.reassemble.yml" "upscale-general-reassemble" "$REASSEMBLE_LOG"
   STAGE2_EXIT=$?
 
   if [ $STAGE2_EXIT -ne 0 ]; then
