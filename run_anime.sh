@@ -1,6 +1,6 @@
 #!/bin/bash
-# run.sh — Batch upscale videos to 1080p using realesr-general-x4v3
-# Usage: ./run.sh
+# run_anime.sh — Batch upscale animated videos to 1080p using realesr-animevideov3
+# Usage: ./run_anime.sh
 
 BASE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 INPUT_DIR="$BASE_DIR/original_video_files"
@@ -157,6 +157,10 @@ run_compose() {
       --project-name "$project" \
       down 2>/dev/null
   )
+  # Let GPU context/memory fully release before the next container starts.
+  # Helps avoid intermittent silent failures when chaining several GPU
+  # containers back-to-back (normalize -> extract -> upscale -> reassemble).
+  sleep 2
   return $exit_code
 }
 
@@ -184,7 +188,7 @@ for i in "${!VIDEO_FILES[@]}"; do
   FILE_NUM=$(( i + 1 ))
   LOG_FILE="$OUTPUT_DIR/${FILENAME%.*}_error.log"
   EPISODE_FILE="$FILENAME"
-  OUTPUT_FILE="${FILENAME%.*}_upscaled_1080p.mkv"
+  OUTPUT_FILE="${FILENAME%.*}_anime_1080p.mkv"
 
   echo ""
   echo "================================================"
@@ -313,6 +317,9 @@ except Exception:
   NORMALIZE_FPS="$EPISODE_FPS"
   NORMALIZED_FILE="${FILENAME%.*}_normalized.mkv"
 
+  LOGS_DIR="$BASE_DIR/per_file_logs"
+  mkdir -p "$LOGS_DIR"
+  SAFE_NAME="${FILENAME%.*}"
   NORMALIZE_LOG="$BASE_DIR/normalize_run.log"
   docker run --rm \
     -v "$INPUT_DIR":/original_video_files \
@@ -328,6 +335,8 @@ except Exception:
     /normalize.sh \
     > "$NORMALIZE_LOG" 2>&1
   NORMALIZE_EXIT=$?
+  sleep 2  # let GPU context release before extract/upscale start
+  cp "$NORMALIZE_LOG" "$LOGS_DIR/${SAFE_NAME}_normalize.log" 2>/dev/null
 
   if [ $NORMALIZE_EXIT -ne 0 ] || [ ! -f "$INPUT_DIR/$NORMALIZED_FILE" ]; then
     ERROR_MSG=$(grep -E "(Error|error|failed)" "$NORMALIZE_LOG" | tail -5)
@@ -356,20 +365,39 @@ except Exception:
   # Poll in background, run compose in foreground so exit code is reliable
   POLL_SENTINEL="$BASE_DIR/.poll_active"
   touch "$POLL_SENTINEL"
-  poll_stage "$COMPOSE_LOG" "restore-ffmpeg-extract" "restore-upscale" "$i" "$FILENAME" "$POLL_SENTINEL" &
+  poll_stage "$COMPOSE_LOG" "anime-ffmpeg-extract" "anime-upscale" "$i" "$FILENAME" "$POLL_SENTINEL" &
   POLL_PID=$!
 
-  run_compose "$BASE_DIR/docker-compose.yml" "upscale-general" "$COMPOSE_LOG"
+  run_compose "$BASE_DIR/docker-compose.yml" "upscale-anime" "$COMPOSE_LOG"
   STAGE1_EXIT=$?
 
   rm -f "$POLL_SENTINEL"
   wait $POLL_PID 2>/dev/null
+
+  cp "$COMPOSE_LOG" "$LOGS_DIR/${SAFE_NAME}_extract_upscale.log" 2>/dev/null
 
   if [ $STAGE1_EXIT -ne 0 ]; then
     ERROR_MSG=$(grep -E "(Error|error|failed|exited with code [^0])" "$COMPOSE_LOG" | tail -5)
     echo "ERROR: Extract/upscale failed for $FILENAME"
     cp "$COMPOSE_LOG" "$LOG_FILE"
     echo -e "\n=== SUMMARY ===\n$ERROR_MSG" >> "$LOG_FILE"
+    update_status "$i" "$FILENAME" "failed" "failed" "$ERROR_MSG"
+    set_file_time "$i" "end_time"
+    FAILED=$(( FAILED + 1 )); FAILED_FILES+=("$FILENAME")
+    rm -f "$FRAMES_DIR"/frame*.png "$UPSCALED_FRAMES_DIR"/frame*.png
+    continue
+  fi
+
+  # Distinguish extract failures from upscale failures: check extracted
+  # frame count *before* trusting upscale's "0 frames in = 0 frames out,
+  # exit 0" success.
+  EXTRACTED_COUNT=$(ls "$FRAMES_DIR"/frame*.png 2>/dev/null | wc -l)
+  echo ">>> Extracted $EXTRACTED_COUNT source frames."
+  if [ "$EXTRACTED_COUNT" -eq 0 ]; then
+    ERROR_MSG="Extract produced 0 frames — normalized input may be unreadable or GPU context unavailable."
+    echo "ERROR: $ERROR_MSG"
+    echo "$ERROR_MSG" > "$LOG_FILE"
+    cat "$COMPOSE_LOG" >> "$LOG_FILE"
     update_status "$i" "$FILENAME" "failed" "failed" "$ERROR_MSG"
     set_file_time "$i" "end_time"
     FAILED=$(( FAILED + 1 )); FAILED_FILES+=("$FILENAME")
@@ -391,8 +419,9 @@ except Exception:
 
   if [ "$UPSCALED_COUNT" -eq 0 ]; then
     echo "ERROR: No upscaled frames found after renaming — upscale may have failed silently."
-    echo "No upscaled frames found after rename." > "$LOG_FILE"
-    update_status "$i" "$FILENAME" "failed" "failed" "No upscaled frames found."
+    echo "No upscaled frames found after rename. Extracted $EXTRACTED_COUNT source frames." > "$LOG_FILE"
+    cat "$COMPOSE_LOG" >> "$LOG_FILE"
+    update_status "$i" "$FILENAME" "failed" "failed" "No upscaled frames found ($EXTRACTED_COUNT extracted)."
     set_file_time "$i" "end_time"
     FAILED=$(( FAILED + 1 )); FAILED_FILES+=("$FILENAME")
     rm -f "$FRAMES_DIR"/frame*.png "$UPSCALED_FRAMES_DIR"/frame*.png
@@ -404,8 +433,9 @@ except Exception:
   echo ">>> Reassembling..."
 
   REASSEMBLE_LOG="$BASE_DIR/reassemble_run.log"
-  run_compose "$BASE_DIR/docker-compose.reassemble.yml" "upscale-general-reassemble" "$REASSEMBLE_LOG"
+  run_compose "$BASE_DIR/docker-compose.reassemble.yml" "upscale-anime-reassemble" "$REASSEMBLE_LOG"
   STAGE2_EXIT=$?
+  cp "$REASSEMBLE_LOG" "$LOGS_DIR/${SAFE_NAME}_reassemble.log" 2>/dev/null
 
   if [ $STAGE2_EXIT -ne 0 ]; then
     ERROR_MSG=$(grep -E "(Error|error|failed|exited with code [^0])" "$REASSEMBLE_LOG" | tail -5)
