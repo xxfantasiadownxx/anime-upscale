@@ -45,6 +45,7 @@ EOF
 
 cat > "$SCRIPTS_DIR/reassemble.sh" << 'EOF'
 #!/bin/sh
+set -e
 if [ -n "$HAS_AUDIO" ]; then
   ffmpeg -hwaccel cuda \
     -framerate "$EPISODE_FPS" \
@@ -67,6 +68,15 @@ else
     -c:v h264_nvenc -preset p4 -rc vbr -cq 18 \
     -vsync cfr \
     "/upscaled_video_files/$OUTPUT_FILE"
+fi
+
+# Defensive check: ffmpeg can occasionally exit 0 having written a
+# truncated/empty file (e.g. disk pressure, killed encoder thread).
+# Treat a missing or empty output as a hard failure.
+OUT_PATH="/upscaled_video_files/$OUTPUT_FILE"
+if [ ! -s "$OUT_PATH" ]; then
+  echo "ERROR: output file missing or empty after reassembly: $OUT_PATH" >&2
+  exit 1
 fi
 EOF
 
@@ -355,6 +365,25 @@ except Exception:
   EPISODE_FILE="$NORMALIZED_FILE"
   FILE="$INPUT_DIR/$NORMALIZED_FILE"
 
+  # Re-probe audio on the NORMALIZED file. The pre-normalize HAS_AUDIO flag
+  # reflects the original source; if normalization dropped or failed to
+  # carry the audio track for any reason, reassembly's -map 1:a would
+  # otherwise fail with "Stream map matches no streams" (exit 1, no output).
+  NORMALIZED_AUDIO_COUNT=$(docker run --rm \
+    --entrypoint ffprobe \
+    -v "$INPUT_DIR":/original_video_files \
+    jrottenberg/ffmpeg:4.4-nvidia \
+    -v error -select_streams a \
+    -show_entries stream=index \
+    -of csv=p=0 \
+    /original_video_files/"$NORMALIZED_FILE" 2>/dev/null | wc -l)
+  if [ "$NORMALIZED_AUDIO_COUNT" -gt 0 ]; then
+    HAS_AUDIO="1"
+  else
+    HAS_AUDIO=""
+  fi
+  echo ">>> Normalized file audio streams: $NORMALIZED_AUDIO_COUNT"
+
   echo ">>> Cleaning up leftover frames..."
   rm -f "$FRAMES_DIR"/frame*.png "$UPSCALED_FRAMES_DIR"/frame*.png
 
@@ -444,6 +473,20 @@ except Exception:
     echo -e "\n=== REASSEMBLE SUMMARY ===\n$ERROR_MSG" >> "$LOG_FILE"
     echo ">>> Error log written to $LOG_FILE"
     update_status "$i" "$FILENAME" "failed" "failed" "Reassembly failed: $ERROR_MSG"
+    set_file_time "$i" "end_time"
+    FAILED=$(( FAILED + 1 )); FAILED_FILES+=("$FILENAME")
+    rm -f "$FRAMES_DIR"/frame*.png "$UPSCALED_FRAMES_DIR"/frame*.png
+    continue
+  fi
+
+  # Host-side belt-and-suspenders check: confirm the output actually landed
+  # and isn't a zero-byte file, regardless of what exit code compose reported.
+  if [ ! -s "$OUTPUT_DIR/$OUTPUT_FILE" ]; then
+    ERROR_MSG="Reassembly reported success but output file is missing or empty: $OUTPUT_DIR/$OUTPUT_FILE"
+    echo "ERROR: $ERROR_MSG"
+    cat "$COMPOSE_LOG" "$REASSEMBLE_LOG" > "$LOG_FILE"
+    echo -e "\n=== REASSEMBLE SUMMARY ===\n$ERROR_MSG" >> "$LOG_FILE"
+    update_status "$i" "$FILENAME" "failed" "failed" "$ERROR_MSG"
     set_file_time "$i" "end_time"
     FAILED=$(( FAILED + 1 )); FAILED_FILES+=("$FILENAME")
     rm -f "$FRAMES_DIR"/frame*.png "$UPSCALED_FRAMES_DIR"/frame*.png
